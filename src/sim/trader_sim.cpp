@@ -59,6 +59,12 @@ void SerializerSim::DefineStruct(ActionOrder& d)
     AddItem(d.limit_price, "limit_price");
 }
 
+void SerializerSim::DefineStruct(ActionTransfer& d)
+{
+    AddItem(d.currency, "currency");
+    AddItem(d.amount, "amount");
+}
+
 TraderSim::TraderSim(std::function<void(const std::string&)> callback)
     : TraderBase(callback)
 {
@@ -91,6 +97,10 @@ void TraderSim::OnInit()
         m_account->risk_ratio = 0;
         m_account->changed = true;
     }
+    auto bank = &(m_data.m_banks["SIM"]);
+    bank->bank_id="SIM";
+    bank->bank_name = u8"模拟银行";
+    bank->changed = true;
     m_something_changed = true;
     char json_str[1024];
     sprintf(json_str, (u8"{"\
@@ -124,8 +134,10 @@ void TraderSim::ProcessInput(const char* json_str)
         ActionOrder action_cancel_order;
         ss.ToVar(action_cancel_order);
         OnClientReqCancelOrder(action_cancel_order);
-    // } else if (aid == "req_transfer") {
-    //     OnClientReqTransfer();
+    } else if (aid == "req_transfer") {
+        ActionTransfer action_transfer;
+        ss.ToVar(action_transfer);
+        OnClientReqTransfer(action_transfer);
     } else if (aid == "peek_message") {
         OnClientPeekMessage();
     }
@@ -139,7 +151,6 @@ void TraderSim::OnFinish()
 
 void TraderSim::OnIdle()
 {
-    //有空的时候, 标记为需查询的项, 如果离上次查询时间够远, 应该发起查询
     long long now = duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
     if (m_peeking_message && (m_next_send_dt < now)){
         m_next_send_dt = now + 100;
@@ -150,14 +161,15 @@ void TraderSim::OnIdle()
 void TraderSim::OnClientReqInsertOrder(ActionOrder action_insert_order)
 {
     std::string symbol = action_insert_order.exchange_id + "." + action_insert_order.ins_id;
+    if(action_insert_order.order_id.empty())
+        action_insert_order.order_id = std::to_string(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
     std::string order_key = action_insert_order.order_id;
-    if(order_key.empty())
-        order_key = std::to_string(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
     auto it = m_data.m_orders.find(order_key);
     if (it != m_data.m_orders.end()) {
-        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:单号重复");
+        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:单号重复", "WARNING");
         return;
     }
+    m_something_changed = true;
     const md_service::Instrument* ins = md_service::GetInstrument(symbol);
     Order* order = &(m_data.m_orders[order_key]);
     order->user_id = action_insert_order.user_id;
@@ -177,59 +189,60 @@ void TraderSim::OnClientReqInsertOrder(ActionOrder action_insert_order)
     order->insert_date_time = GetLocalEpochNano();
     order->seqno = m_last_seq_no++;
     if (action_insert_order.user_id.substr(0, m_user_id.size()) != m_user_id){
-        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:下单指令中的用户名错误");
+        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:下单指令中的用户名错误", "WARNING");
         order->status = kOrderStatusFinished;
         return;
     }
     if (!ins) {
-        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:合约不合法");
+        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:合约不合法", "WARNING");
         order->status = kOrderStatusFinished;
         return;
     }
     if (ins->product_class != md_service::kProductClassFutures) {
-        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:模拟交易只支持期货合约");
+        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:模拟交易只支持期货合约", "WARNING");
         order->status = kOrderStatusFinished;
         return;
     }
     if (action_insert_order.volume <= 0) {
-        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:下单手数应该大于0");
+        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:下单手数应该大于0", "WARNING");
         order->status = kOrderStatusFinished;
         return;
     }
     double xs = action_insert_order.limit_price / ins->price_tick;
     if (xs - int(xs + 0.5) >= 0.001) {
-        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:下单价格不是价格单位的整倍数");
+        OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:下单价格不是价格单位的整倍数", "WARNING");
         order->status = kOrderStatusFinished;
         return;
     }
     Position* position = &(m_data.m_positions[symbol]);
     position->ins = ins;
-    position->instrument_id = ins->ins_id;
-    position->exchange_id = ins->exchange_id;
+    position->instrument_id = order->instrument_id;
+    position->exchange_id = order->exchange_id;
     position->user_id = m_user_id;
     if (action_insert_order.offset == kOffsetOpen) {
         if (position->ins->margin * action_insert_order.volume > m_account->available) {
-            OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:开仓保证金不足");
+            OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:开仓保证金不足", "WARNING");
             order->status = kOrderStatusFinished;
             return;
         }
     } else {
         if ((action_insert_order.direction == kDirectionBuy && position->volume_short < action_insert_order.volume + position->volume_short_frozen_today)
             || (action_insert_order.direction == kDirectionSell && position->volume_long < action_insert_order.volume + position->volume_long_frozen_today)) {
-            OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:平仓手数超过持仓量");
+            OutputNotify(1, u8"下单, 已被服务器拒绝, 原因:平仓手数超过持仓量", "WARNING");
             order->status = kOrderStatusFinished;
             return;
         }
     }
     m_alive_order_set.insert(order);
     UpdateOrder(order);
+    SaveUserDataFile();
     return;
 }
 
 void TraderSim::OnClientReqCancelOrder(ActionOrder action_cancel_order)
 {
     if (action_cancel_order.user_id.substr(0, m_user_id.size()) != m_user_id) {
-        OutputNotify(1, u8"撤单, 已被服务器拒绝, 原因:撤单指令中的用户名错误");
+        OutputNotify(1, u8"撤单, 已被服务器拒绝, 原因:撤单指令中的用户名错误", "WARNING");
         return;
     }
     for (auto it_order = m_alive_order_set.begin(); it_order != m_alive_order_set.end(); ++it_order) {
@@ -238,11 +251,25 @@ void TraderSim::OnClientReqCancelOrder(ActionOrder action_cancel_order)
             && order->status == kOrderStatusAlive) {
             order->status = kOrderStatusFinished;
             UpdateOrder(order);
+            m_something_changed = true;
             return;
         }
     }
-    OutputNotify(1, u8"要撤销的单不存在");
+    OutputNotify(1, u8"要撤销的单不存在", "WARNING");
     return;
+}
+
+void TraderSim::OnClientReqTransfer(ActionTransfer action_transfer)
+{
+    if(action_transfer.amount > 0){
+        m_account->deposit += action_transfer.amount;
+    } else {
+        m_account->withdraw -= action_transfer.amount;
+    }
+    m_account->static_balance += action_transfer.amount;
+    m_account->changed = true;
+    m_something_changed = true;
+    SendUserData();
 }
 
 void TraderSim::OnClientPeekMessage()
@@ -274,7 +301,7 @@ void TraderSim::SendUserData()
         double last_price = ps.ins->last_price;
         if (!IsValid(last_price))
             last_price = ps.ins->pre_settlement;
-        if (last_price != ps.last_price || ps.changed) {
+        if ((IsValid(last_price) && (last_price != ps.last_price)) || ps.changed) {
             ps.last_price = last_price;
             ps.position_profit_long = ps.last_price * ps.volume_long * ps.ins->volume_multiple - ps.position_cost_long;
             ps.position_profit_short = ps.position_cost_short - ps.last_price * ps.volume_short * ps.ins->volume_multiple;
@@ -310,6 +337,7 @@ void TraderSim::SendUserData()
     if (!m_something_changed)
         return;
     //构建数据包
+    m_data.m_trade_more_data = false;
     SerializerTradeBase nss;
     rapidjson::Pointer("/aid").Set(*nss.m_doc, "rtn_data");
     rapidjson::Value node_data;
@@ -347,13 +375,13 @@ void TraderSim::CheckOrderTrade(Order* order)
     auto ins = md_service::GetInstrument(order->symbol());
     if (order->price_type == kPriceTypeLimit){
         if (order->limit_price - 0.0001 > ins->upper_limit) {
-            OutputNotify(1, u8"下单,已被服务器拒绝,原因:已撤单报单被拒绝价格超出涨停板");
+            OutputNotify(1, u8"下单,已被服务器拒绝,原因:已撤单报单被拒绝价格超出涨停板", "WARNING");
             order->status = kOrderStatusFinished;
             UpdateOrder(order);
             return;
         }
         if (order->limit_price + 0.0001 < ins->lower_limit) {
-            OutputNotify(1, u8"下单,已被服务器拒绝,原因:已撤单报单被拒绝价格跌破跌停板");
+            OutputNotify(1, u8"下单,已被服务器拒绝,原因:已撤单报单被拒绝价格跌破跌停板", "WARNING");
             order->status = kOrderStatusFinished;
             UpdateOrder(order);
             return;
@@ -482,21 +510,8 @@ void TraderSim::LoadUserDataFile()
 {
     if (m_user_file_path.empty())
         return;
-    //选出最新的一个存档文件
-    std::vector<std::string> saved_files;
-    for (auto& p : std::experimental::filesystem::v1::directory_iterator(m_user_file_path)) {
-        if (!std::experimental::filesystem::v1::is_regular_file(p.status()))
-            continue;
-        std::string file_name_stem = p.path().stem().u8string();
-        if (file_name_stem != m_user_id)
-            continue;
-        saved_files.push_back(p.path().c_str());
-    }
-    if (saved_files.empty())
-        return;
-    std::sort(saved_files.begin(), saved_files.end());
-    auto fn = saved_files.back();
     //加载存档文件
+    std::string fn = m_user_file_path + "/" + m_user_id;
     SerializerTradeBase nss;
     nss.FromFile(fn.c_str());
     nss.ToVar(m_data);
@@ -504,7 +519,7 @@ void TraderSim::LoadUserDataFile()
     for (auto it = m_data.m_positions.begin(); it != m_data.m_positions.end();) {
         Position& position = it->second;
         position.ins = md_service::GetInstrument(position.symbol());
-        if (position.ins)
+        if (position.ins && !position.ins->expired)
             ++it;
         else
             it = m_data.m_positions.erase(it);
@@ -514,12 +529,13 @@ void TraderSim::LoadUserDataFile()
         用户权益转为昨权益, 平仓盈亏
         持仓手数全部移动到昨仓, 持仓均价调整到昨结算价
     */
-    if (fn.substr(fn.size()-8, 8) != g_config.trading_day){
+    if (m_data.trading_day != g_config.trading_day){
         m_data.m_orders.clear();
         m_data.m_trades.clear();
         for (auto it = m_data.m_accounts.begin(); it != m_data.m_accounts.end(); ++it) {
             Account& item = it->second;
             item.pre_balance += (item.close_profit - item.commission + item.deposit - item.withdraw);
+            item.static_balance = item.pre_balance;
             item.close_profit = 0;
             item.commission = 0;
             item.withdraw = 0;
@@ -536,6 +552,7 @@ void TraderSim::LoadUserDataFile()
             item.volume_short_frozen_today = 0;
             item.changed = true;
         }
+        m_data.trading_day = g_config.trading_day;
     } else {
         for (auto it = m_data.m_orders.begin(); it != m_data.m_orders.end(); ++it){
             m_alive_order_set.insert(&(it->second));
@@ -547,9 +564,10 @@ void TraderSim::SaveUserDataFile()
 {
     if (m_user_file_path.empty())
         return;
-    std::string fn = m_user_file_path + "/" + m_user_id + "." + g_config.trading_day;
+    std::string fn = m_user_file_path + "/" + m_user_id;
     SerializerTradeBase nss;
     nss.dump_all = true;
+    m_data.trading_day = g_config.trading_day;
     nss.FromVar(m_data);
     nss.ToFile(fn.c_str());
 }

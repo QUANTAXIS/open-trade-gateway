@@ -5,7 +5,9 @@
 /////////////////////////////////////////////////////////////////////////
 
 #pragma once
-#include <thread>
+
+#include <boost/asio/io_context.hpp>
+
 
 namespace md_service {
 const int kOptionClassCall = 1;
@@ -34,10 +36,7 @@ const int kExchangeAll = 0xFFFFFFFF;
 
 struct Instrument {
     Instrument();
-    std::string symbol;
     bool expired;
-    std::string ins_id;
-    std::string exchange_id;
     long product_class;
     long volume_multiple;
     volatile double margin;
@@ -50,13 +49,6 @@ struct Instrument {
     volatile double lower_limit;
     volatile double ask_price1;
     volatile double bid_price1;
-};
-
-struct MdData {
-    MdData() { mdhis_more_data = false; }
-    std::string ins_list;
-    std::map<std::string, Instrument> quotes;
-    bool mdhis_more_data;
 };
 
 
@@ -72,12 +64,12 @@ Example:
         ins->volume_multiple; //合约乘数
         ins->last_price; //合约的最新价
 */
-//初始化 MdService 实例, 初始化失败则返回 false
-bool Init();
+
+bool LoadInsList();
+//初始化 MdService 实例
+bool Init(boost::asio::io_context& ioc);
 //要求 MdService 实例停止运行
 void Stop();
-//
-void CleanUp();
 //获取指定代码的合约/行情信息
 Instrument* GetInstrument(const std::string& symbol);
 }

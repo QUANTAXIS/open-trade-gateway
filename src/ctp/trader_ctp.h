@@ -33,12 +33,16 @@ private:
     void OnClientReqInsertOrder(CtpActionInsertOrder d);
     void OnClientReqCancelOrder(CtpActionCancelOrder d);
     void OnClientReqTransfer(CThostFtdcReqTransferField f);
+    void OnClientReqChangePassword(CThostFtdcUserPasswordUpdateField f);
+    CThostFtdcInputOrderField m_input_order;
+    CThostFtdcOrderActionField m_action_order;
 
     //数据更新发送
     void OnClientPeekMessage();
     void SendUserData();
     std::atomic_bool m_peeking_message;
     std::atomic_bool m_something_changed;
+    std::atomic_bool m_position_ready;
 
     //登录相关
     void SendLoginRequest();

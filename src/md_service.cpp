@@ -8,10 +8,19 @@
 #include "md_service.h"
 
 #include <iostream>
-
-#define ASIO_STANDALONE
-#include "websocketpp/config/asio_no_tls_client.hpp"
-#include "websocketpp/client.hpp"
+#include <functional>
+#include <utility>
+#include <boost/interprocess/managed_shared_memory.hpp>
+#include <boost/interprocess/containers/map.hpp>
+#include <boost/interprocess/allocators/allocator.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/bind_executor.hpp>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/signal_set.hpp>
+#include <boost/asio/write.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
 
 #include "log.h"
 #include "config.h"
@@ -19,11 +28,6 @@
 #include "http.h"
 #include "version.h"
 
-typedef websocketpp::client<websocketpp::config::asio_client> client;
-using websocketpp::lib::placeholders::_1;
-using websocketpp::lib::placeholders::_2;
-using websocketpp::lib::bind;
-typedef websocketpp::config::asio_client::message_type::ptr message_ptr;
 
 namespace md_service{
 
@@ -50,10 +54,7 @@ class InsFileParser
 public:
     void DefineStruct(Instrument& d)
     {
-        AddItem(d.symbol, ("instrument_id"));
         AddItem(d.expired, ("expired"));
-        AddItem(d.ins_id, ("ins_id"));
-        AddItem(d.exchange_id, ("exchange_id"));
         AddItemEnum(d.product_class, ("class"), {
             { kProductClassFutures, ("FUTURE") },
             { kProductClassOptions, ("OPTION") },
@@ -86,190 +87,292 @@ public:
         AddItem(data.ask_price1, ("ask_price1"));
         AddItem(data.bid_price1, ("bid_price1"));
     }
+};
 
-    void DefineStruct(MdData& d)
-    {
-        AddItem(d.ins_list, ("ins_list"));
-        AddItem(d.quotes, ("quotes"));
-        AddItem(d.mdhis_more_data, ("mdhis_more_data"));
+typedef std::array<char, 64> InsMapKeyType;
+typedef Instrument InsMapMappedType;
+typedef std::pair<const InsMapKeyType, InsMapMappedType> InsMapValueType;
+typedef boost::interprocess::allocator<InsMapValueType, boost::interprocess::managed_shared_memory::segment_manager> ShmemAllocator;
+struct CharArrayComparer {
+    bool operator()(const std::array<char, 64>& a, const std::array<char, 64>& b) const {
+        return strncmp(a.data(), b.data(), 64) < 0;
     }
 };
+typedef boost::interprocess::map<InsMapKeyType, InsMapMappedType, CharArrayComparer, ShmemAllocator> InsMapType;
 
 static struct MdServiceContext
 {
     //合约及行情数据
-    MdData m_data;
+    InsMapType* m_ins_map;
 
     //发送包管理
     std::string m_req_subscribe_quote;
     std::string m_req_peek_message;
-    bool m_connected;
 
     //工作线程
-    std::thread m_worker_thread;
+    boost::asio::io_context* m_ioc;
+    boost::asio::ip::tcp::resolver* m_resolver;
+    boost::beast::websocket::stream<boost::asio::ip::tcp::socket>* m_ws_socket;
+    boost::beast::multi_buffer m_input_buffer;
+    boost::beast::multi_buffer m_output_buffer;
 } md_context;
 
 Instrument* GetInstrument(const std::string& symbol)
 {
-    auto it = md_context.m_data.quotes.find(symbol);
-    if (it != md_context.m_data.quotes.end())
+    std::array<char, 64> key = {};
+    std::copy(symbol.begin(), symbol.end(), key.data());
+    auto it = md_context.m_ins_map->find(key);
+    if (it != md_context.m_ins_map->end())
         return &(it->second);
     return NULL;
 }
 
 using namespace std::chrono;
 
-void OnWsMdData(const char* in)
+const char* md_host = "openmd.shinnytech.com";
+const char* md_port = "80";
+const char* md_path = "/t/md/front/mobile";
+
+
+void OnResolve(boost::system::error_code ec, boost::asio::ip::tcp::resolver::results_type results);
+void OnConnect(boost::system::error_code ec);
+void OnHandshake(boost::system::error_code ec);
+void DoRead();
+void OnRead(boost::system::error_code ec, std::size_t bytes_transferred);
+void DoWrite();
+void OnWrite(boost::system::error_code ec, std::size_t bytes_transferred);
+void OnMessage(const std::string &json_str);
+void SendTextMsg(const std::string &msg);
+
+
+void DoResolve()
 {
-    MdParser ss;
-    ss.FromString(in);
-    rapidjson::Value* dt = rapidjson::Pointer("/data").Get(*(ss.m_doc));
-    if (dt && dt->IsArray()) {
-        for (auto& v : dt->GetArray())
-            ss.ToVar(md_context.m_data, &v);
-    }
+    md_context.m_resolver->async_resolve(
+        md_host,
+        md_port,
+        std::bind(
+            OnResolve,
+            std::placeholders::_1,
+            std::placeholders::_2));
 }
 
-void SendTextMsg(client* c, websocketpp::connection_hdl hdl, const std::string& msg){
-    websocketpp::lib::error_code ec;
-    c->send(hdl, msg, websocketpp::frame::opcode::value::TEXT, ec);
-    if (ec) {
-        Log(LOG_ERROR, NULL, "md service send message fail, ec=%s, message=%s", ec.message().c_str(), msg.c_str());
-    }else{
-        Log(LOG_INFO, NULL, "md service send message success, len=%d", msg.size());
-    }
-}
-
-static bool ReqConnect(client* c)
+void OnResolve(boost::system::error_code ec, boost::asio::ip::tcp::resolver::results_type results) 
 {
-    std::string uri = "ws://openmd.shinnytech.com/t/md/front/mobile";
-    websocketpp::lib::error_code ec;
-    client::connection_ptr con = c->get_connection(uri, ec);
-    if (ec) {
-        Log(LOG_ERROR, NULL, "md service create connection fail, reason=%s", ec.message().c_str());
-        return false;
+    if (ec){
+        Log(LOG_WARNING, NULL, "md service resolve fail, ec=%s", ec.message().c_str());
+        return;
     }
-    con->append_header("Accept", "application/v1+json");
-    con->append_header("User-Agent", "OTG-" VERSION_STR);
-    c->connect(con);
-    return true;
+    // Make the connection on the IP address we get from a lookup
+    boost::asio::async_connect(
+        md_context.m_ws_socket->next_layer(),
+        results.begin(),
+        results.end(),
+        std::bind(
+            OnConnect,
+            std::placeholders::_1));
 }
 
-void OnMessage(client* c, websocketpp::connection_hdl hdl, message_ptr msg) {
-    Log(LOG_INFO, NULL, "md service received message, len=%d", msg->get_payload().size());
-    SendTextMsg(c, hdl, md_context.m_req_peek_message);
-    OnWsMdData(msg->get_payload().c_str());
-}
-
-void Ping(client*c, websocketpp::connection_hdl hdl)
+void OnConnect(boost::system::error_code ec) 
 {
-    Log(LOG_INFO, NULL, "md ping");
-    if (md_context.m_connected){
-        c->ping(hdl, "");
+    if (ec){
+        Log(LOG_WARNING, NULL, "md session connect fail, ec=%s", ec.message().c_str());
+        return;
     }
-    c->set_timer(10000, bind(&Ping, c, hdl));
+    // Perform the websocket handshake
+    md_context.m_ws_socket->async_handshake_ex(md_host, md_path,
+        [](boost::beast::websocket::request_type& m)
+        {
+            m.insert(boost::beast::http::field::accept, "application/v1+json");
+            m.insert(boost::beast::http::field::user_agent, "OTG-" VERSION_STR);
+        },
+        std::bind(
+            OnHandshake,
+            std::placeholders::_1));
 }
 
-void OnOpenConnection(client* c, websocketpp::connection_hdl hdl)
+void OnHandshake(boost::system::error_code ec)
 {
+    if (ec){
+        Log(LOG_WARNING, NULL, "md session handshake fail, ec=%s", ec.message().c_str());
+        return;
+    }
     Log(LOG_INFO, NULL, "md service got connection");
-    md_context.m_connected = true;
-    SendTextMsg(c, hdl, md_context.m_req_subscribe_quote);
-    SendTextMsg(c, hdl, md_context.m_req_peek_message);
-    c->set_timer(10000, bind(&Ping, c, hdl));
+    SendTextMsg(md_context.m_req_subscribe_quote);
+    SendTextMsg(md_context.m_req_peek_message);
+    DoRead();
 }
 
-void OnFailConnection(client* c, websocketpp::connection_hdl hdl)
+void DoRead()
 {
-    Log(LOG_ERROR, NULL, "md service connection error");
-    c->set_timer(10000, bind(&ReqConnect, c));
+    md_context.m_ws_socket->async_read(
+        md_context.m_input_buffer,
+        std::bind(
+            OnRead,
+            std::placeholders::_1,
+            std::placeholders::_2));
 }
 
-void OnCloseConnection(client* c, websocketpp::connection_hdl hdl)
+void OnRead(boost::system::error_code ec, std::size_t bytes_transferred)
 {
-    Log(LOG_ERROR, NULL, "md service connection closed");
-    c->set_timer(10000, bind(&ReqConnect, c));
-}
-
-void OnPongTimeout(client* c, websocketpp::connection_hdl hdl)
-{
-    Log(LOG_ERROR, NULL, "md service pong timeout");
-    md_context.m_connected = false;
-    ReqConnect(c);
-}
-
-void Run()
-{
-    while(true){
-        try {
-            client c;
-            // Set logging to be pretty verbose (everything except message payloads)
-            c.clear_access_channels(websocketpp::log::alevel::all);
-            c.clear_access_channels(websocketpp::log::alevel::all);
-            // Initialize ASIO
-            c.init_asio();
-            // Register our message handler
-            c.set_open_handler(bind(&OnOpenConnection, &c, ::_1));
-            c.set_fail_handler(bind(&OnFailConnection, &c, ::_1));
-            c.set_close_handler(bind(&OnCloseConnection, &c, ::_1));
-            c.set_pong_timeout(5000);
-            c.set_pong_timeout_handler(bind(&OnPongTimeout, &c, ::_1));
-            c.set_message_handler(bind(&OnMessage, &c, ::_1, ::_2));
-            if (!ReqConnect(&c)){
-                sleep(10000);
-                continue;
-            }
-            // Start the ASIO io_service run loop
-            // this will cause a single connection to be made to the server. c.run()
-            // will exit when this connection is closed.
-            c.run();
-            sleep(10000);
-        } catch (websocketpp::exception const & e) {
-            Log(LOG_ERROR, NULL, "md service websocket exception, what=%s", e.what());
+    boost::ignore_unused(bytes_transferred);
+    if (ec) {
+        if (ec != boost::beast::websocket::error::closed){
+            Log(LOG_WARNING, NULL, "md service read fail, ec=%s", ec.message().c_str());
         }
+        Log(LOG_INFO, NULL, "md session loss connection");
+        DoResolve();
+        return;
+    }
+    OnMessage(boost::beast::buffers_to_string(md_context.m_input_buffer.data()));
+    md_context.m_input_buffer.consume(md_context.m_input_buffer.size());
+    // Do another read
+    DoRead();
+}
+
+void OnMessage(const std::string &json_str)
+{
+    Log(LOG_INFO, NULL, "md service received message, len=%d", json_str.size());
+    SendTextMsg(md_context.m_req_peek_message);
+    MdParser ss;
+    ss.FromString(json_str.c_str());
+    rapidjson::Value* dt = rapidjson::Pointer("/data/0/quotes").Get(*(ss.m_doc));
+    if (!dt)
+        return;
+    for(auto& m: dt->GetObject()){
+        std::array<char, 64> key = {};
+        strncpy(key.data(), m.name.GetString(), 64);
+        auto it = md_context.m_ins_map->find(key);
+        if (it == md_context.m_ins_map->end())
+            continue;
+        ss.ToVar(it->second, &m.value);
     }
 }
 
-bool Init()
+void SendTextMsg(const std::string &msg)
 {
+    if(md_context.m_output_buffer.size() > 0){
+        size_t n = boost::asio::buffer_copy(md_context.m_output_buffer.prepare(msg.size()), boost::asio::buffer(msg));
+        md_context.m_output_buffer.commit(n);
+    } else {
+        size_t n = boost::asio::buffer_copy(md_context.m_output_buffer.prepare(msg.size()), boost::asio::buffer(msg));
+        md_context.m_output_buffer.commit(n);
+        DoWrite();
+    }
+}
+
+void DoWrite()
+{
+    md_context.m_ws_socket->text(true);
+    md_context.m_ws_socket->async_write(
+        md_context.m_output_buffer.data(),
+        std::bind(
+            OnWrite,
+            std::placeholders::_1,
+            std::placeholders::_2));
+}
+
+void OnWrite(boost::system::error_code ec, std::size_t bytes_transferred)
+{
+    if (ec){
+        Log(LOG_WARNING, NULL, "md session send message fail");
+    }
+    md_context.m_output_buffer.consume(bytes_transferred);
+    if(md_context.m_output_buffer.size() > 0)
+        DoWrite();
+}
+
+bool LoadInsList()
+{
+   boost::interprocess::shared_memory_object::remove("InsMapSharedMemory");
+   boost::interprocess::managed_shared_memory* segment = new boost::interprocess::managed_shared_memory
+      (boost::interprocess::create_only
+      ,"InsMapSharedMemory" //segment name
+      ,32 * 1024 * 1024);          //segment size in bytes
+
+   //Initialize the shared memory STL-compatible allocator
+//    ShmemAllocator alloc_inst (segment.get_segment_manager());
+   ShmemAllocator* alloc_inst = new ShmemAllocator(segment->get_segment_manager());
+
+   //Construct a shared memory map.
+   //Note that the first parameter is the comparison function,
+   //and the second one the allocator.
+   //This the same signature as std::map's constructor taking an allocator
+   md_context.m_ins_map = 
+      segment->construct<InsMapType>("InsMap")      //object name
+                                 (CharArrayComparer() //first  ctor parameter
+                                 ,*alloc_inst);     //second ctor parameter
+
     //下载和加载合约表文件
     std::string content;
-    InsFileParser ss;
     if (HttpGet(ins_file_url, &content) != 0) {
         Log(LOG_FATAL, NULL, "md service download ins file fail");
         exit(-1);
     }
+    InsFileParser ss;
     if (!ss.FromString(content.c_str())) {
         Log(LOG_FATAL, NULL, "md service parse downloaded ins file fail");
         exit(-1);
     }
-    ss.ToVar(md_context.m_data.quotes);
-    //订阅全行情
-    std::string ins_list;
-    for (auto it = md_context.m_data.quotes.begin(); it != md_context.m_data.quotes.end(); ++it) {
-        auto& symbol = it->first;
-        auto& ins = it->second;
-        if(!ins.expired && (ins.product_class == kProductClassFutures
-            || ins.product_class == kProductClassOptions
-            || ins.product_class == kProductClassFOption
-            )){
-            ins_list += symbol;
-            ins_list += ",";
-        }
+    for(auto& m: ss.m_doc->GetObject()){
+        std::array<char, 64> key = {};
+        strncpy(key.data(), m.name.GetString(), 64);
+        ss.ToVar((*md_context.m_ins_map)[key], &m.value);
     }
-    md_context.m_req_peek_message = "{\"aid\":\"peek_message\"}";
-    md_context.m_req_subscribe_quote = "{\"aid\": \"subscribe_quote\", \"ins_list\": \"" + ins_list + "\"}";
-    md_context.m_connected = false;
-    md_context.m_worker_thread = std::thread(Run);
     return true;
+}
+
+bool Init(boost::asio::io_context& ioc)
+{
+    // Inform the io_context that we are about to fork. The io_context
+    // cleans up any internal resources, such as threads, that may
+    // interfere with forking.
+    ioc.notify_fork(boost::asio::io_context::fork_prepare);
+
+    if (fork() == 0)
+    {
+        // In child process
+        std::string ins_list;
+        for(auto it = md_context.m_ins_map->begin(); it != md_context.m_ins_map->end(); ++it){
+            auto& key = it->first;
+            Instrument& ins = it->second;
+            if(!ins.expired && (ins.product_class == kProductClassFutures
+                || ins.product_class == kProductClassOptions
+                || ins.product_class == kProductClassFOption
+                )){
+                ins_list += std::string(key.data());
+                ins_list += ",";
+            }
+        }
+        md_context.m_req_peek_message = "{\"aid\":\"peek_message\"}";
+        md_context.m_req_subscribe_quote = "{\"aid\": \"subscribe_quote\", \"ins_list\": \"" + ins_list + "\"}";
+
+        // Inform the io_context that the fork is finished and that this
+        // is the child process. The io_context uses this opportunity to
+        // create any internal file descriptors that must be private to
+        // the new process.
+        ioc.notify_fork(boost::asio::io_context::fork_child);
+
+        md_context.m_ioc = &ioc;
+        md_context.m_ws_socket = new boost::beast::websocket::stream<boost::asio::ip::tcp::socket>(ioc);
+        md_context.m_resolver = new boost::asio::ip::tcp::resolver(ioc);
+
+        // Look up the domain name
+        DoResolve();
+        return true;
+    }
+    else
+    {
+        // In parent process
+        // Inform the io_context that the fork is finished (or failed)
+        // and that this is the parent process. The io_context uses this
+        // opportunity to recreate any internal resources that were
+        // cleaned up during preparation for the fork.
+        ioc.notify_fork(boost::asio::io_context::fork_parent);
+        return false;
+    }
 }
 
 void Stop()
 {
 }
-
-void CleanUp()
-{
-}
-
 }
