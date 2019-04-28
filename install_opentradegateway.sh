@@ -19,6 +19,7 @@ ln -s /usr/local/ssl/lib/libssl.a /usr/local/lib/libssl.a
 ln -s /usr/local/ssl/lib/libcrypto.so /usr/local/lib/libcrypto.so
 ln -s /usr/local/ssl/lib/libcrypto.a /usr/local/lib/libcrypto.a
 echo "/usr/local/ssl/lib" >> /etc/ld.so.conf
+echo "/usr/local/bin" >> /etc/ld.so.conf
 ldconfig -v
 
 #ECHO "CLONE OPEN-TRADE-GATEWAY and Install"
