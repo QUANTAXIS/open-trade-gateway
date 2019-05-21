@@ -162,7 +162,7 @@ private:
 
 	std::atomic_int _requestID;;
 
-	bool _logIn;
+	int _logIn_status;
 
 	boost::mutex _logInmutex;
 
@@ -228,6 +228,10 @@ private:
 
 	std::map<std::string, Bank> m_banks;
 
+	int m_try_req_authenticate_times;
+
+	int m_try_req_login_times;
+
 	void InitTdApi();
 
 	void StopTdApi();
@@ -264,7 +268,7 @@ private:
 
 	std::string GetConnectionStr();
 
-	bool WaitLogIn();
+	int WaitLogIn();
 
 	int ReqAuthenticate();
 

@@ -42,11 +42,16 @@ bool UserProcessInfo::StartProcess()
 			
 			return StartProcess_i("open-trade-ctp", cmd);			
 		}
-		else if (_reqLogin.broker.broker_type == "ctpse")
+		else if (_reqLogin.broker.broker_type == "ctpse13")
 		{
-			std::string cmd = "ctpse_" + _reqLogin.bid + "_" + _reqLogin.user_name;			
+			std::string cmd = "ctpse_" + _reqLogin.bid + "_" + _reqLogin.user_name;
 			return StartProcess_i("open-trade-ctpse", cmd);
 		}
+		else if (_reqLogin.broker.broker_type == "ctpse")
+		{
+			std::string cmd = "ctpse15_" + _reqLogin.bid + "_" + _reqLogin.user_name;
+			return StartProcess_i("open-trade-ctpse15", cmd);			
+		}		
 		else if (_reqLogin.broker.broker_type == "sim")
 		{
 			std::string cmd = "sim_" + _reqLogin.bid + "_" + _reqLogin.user_name;
@@ -59,15 +64,14 @@ bool UserProcessInfo::StartProcess()
 		}
 		else
 		{
-			Log(LOG_ERROR,NULL,"trade server req_login invalid broker_type=%s"
+			Log2(LOG_ERROR,"trade server req_login invalid broker_type,%s"
 				, _reqLogin.broker.broker_type.c_str());			
 			return false;
 		}		
 	}
 	catch (const std::exception& ex)
 	{
-		Log(LOG_WARNING, NULL
-			,"UserProcessInfo::StartProcess() fail:%s!",ex.what());
+		Log2(LOG_WARNING,"UserProcessInfo::StartProcess() fail,%s!",ex.what());
 		return false;
 	}	
 }
@@ -122,7 +126,7 @@ void UserProcessInfo::SendMsg(int connid,const std::string& msg)
 {	
 	if (nullptr == _in_mq_ptr)
 	{
-		Log(LOG_WARNING, NULL, "UserProcessInfo::SendMsg,nullptr == _in_mq_ptr");
+		Log2(LOG_WARNING,"UserProcessInfo::SendMsg,nullptr is _in_mq_ptr");
 		return;
 	}
 
@@ -135,8 +139,7 @@ void UserProcessInfo::SendMsg(int connid,const std::string& msg)
 	}
 	catch (std::exception& ex)
 	{
-		Log(LOG_ERROR, NULL
-			, "UserProcessInfo::SendMsg Erro:%s,msg:%s,length:%d"
+		Log(LOG_ERROR,"msg=UserProcessInfo::SendMsg Erro,%s;msgdata=%s;length=%d"
 			, ex.what(), str.c_str(), str.length());
 	}	
 }
@@ -145,7 +148,7 @@ void UserProcessInfo::NotifyClose(int connid)
 {
 	if (nullptr == _in_mq_ptr)
 	{
-		Log(LOG_WARNING, NULL, "UserProcessInfo::NotifyClose,nullptr == _in_mq_ptr");
+		Log2(LOG_WARNING,"UserProcessInfo::NotifyClose,nullptr is _in_mq_ptr");
 		return;
 	}
 
@@ -158,56 +161,73 @@ void UserProcessInfo::NotifyClose(int connid)
 	}
 	catch (std::exception& ex)
 	{
-		Log(LOG_ERROR, NULL
-			, "UserProcessInfo::SendMsg Erro:%s,msg:%s,length:%d"
+		Log(LOG_ERROR,"msg=UserProcessInfo::SendMsg Erro:%s;msgdata=%s;length=%d"
 			, ex.what(), str.c_str(), str.length());
-	}
-}
-
-void UserProcessInfo::Child_Exit_handle(boost::system::error_code ec, int code)
-{
-	if (ec)
-	{
-		Log(LOG_WARNING,NULL
-			, "UserProcessInfo Child_Exit_handle Erorr,msg=%s"
-			,ec.message().c_str());		
-	}
-	else
-	{
-		Log(LOG_WARNING
-			, NULL
-			, "UserProcessInfo Child_Exit_handle,code=%d"
-			, code);
 	}
 }
 
 bool UserProcessInfo::StartProcess_i(const std::string& name, const std::string& cmd)
 {	
-	_out_mq_name = cmd + "_msg_out";
-	_in_mq_name = cmd + "_msg_in";
-	boost::interprocess::message_queue::remove(_out_mq_name.c_str());
-	boost::interprocess::message_queue::remove(_in_mq_name.c_str());
-
-	_out_mq_ptr = std::shared_ptr <boost::interprocess::message_queue>
-		(new boost::interprocess::message_queue(boost::interprocess::create_only
-			, _out_mq_name.c_str(), MAX_MSG_NUMS, MAX_MSG_LENTH));
-	_thread_ptr.reset();
-
-	_thread_ptr = std::shared_ptr<boost::thread>(
-		new boost::thread(boost::bind(&UserProcessInfo::ReceiveMsg_i,shared_from_this())));
-
-	_in_mq_ptr = std::shared_ptr <boost::interprocess::message_queue>
-		(new boost::interprocess::message_queue(boost::interprocess::create_only
-			, _in_mq_name.c_str(), MAX_MSG_NUMS, MAX_MSG_LENTH));
-	
-	_process_ptr = std::make_shared<boost::process::child>(boost::process::child(
-		boost::process::search_path(name)
-		,cmd.c_str()));
-	if (nullptr == _process_ptr)
+	try
 	{
+		_out_mq_name = cmd + "_msg_out";
+		boost::interprocess::message_queue::remove(_out_mq_name.c_str());
+		_out_mq_ptr = std::shared_ptr <boost::interprocess::message_queue>
+			(new boost::interprocess::message_queue(boost::interprocess::create_only
+				, _out_mq_name.c_str(), MAX_MSG_NUMS, MAX_MSG_LENTH));
+	}
+	catch (std::exception& ex)
+	{
+		Log(LOG_ERROR, "msg=StartProcess_i,create out message queue;user key name=%s;errmsg=%s"
+			,_key.c_str(), ex.what());
 		return false;
 	}
-	return _process_ptr->running();
+
+	try
+	{
+		_thread_ptr.reset();
+		_thread_ptr = std::shared_ptr<boost::thread>(
+			new boost::thread(boost::bind(&UserProcessInfo::ReceiveMsg_i, shared_from_this())));
+	}
+	catch (std::exception& ex)
+	{
+		Log(LOG_ERROR, "msg=StartProcess_i,start ReceiveMsg_i thread;user key name=%s;errmsg=%s"
+			, _key.c_str(),ex.what());
+		return false;
+	}
+
+	try
+	{
+		_in_mq_name = cmd + "_msg_in";
+		boost::interprocess::message_queue::remove(_in_mq_name.c_str());
+		_in_mq_ptr = std::shared_ptr <boost::interprocess::message_queue>
+			(new boost::interprocess::message_queue(boost::interprocess::create_only
+				, _in_mq_name.c_str(), MAX_MSG_NUMS, MAX_MSG_LENTH));
+	}
+	catch (std::exception& ex)
+	{
+		Log(LOG_ERROR, "msg=StartProcess_i,create in message queue;user key name=%s;errmsg=%s"
+			, _key.c_str(),ex.what());
+		return false;
+	}
+	
+	try
+	{
+		_process_ptr = std::make_shared<boost::process::child>(boost::process::child(
+			boost::process::search_path(name)
+			, cmd.c_str()));
+		if (nullptr == _process_ptr)
+		{
+			return false;
+		}
+		return _process_ptr->running();
+	}
+	catch (std::exception& ex)
+	{
+		Log(LOG_ERROR, "msg=StartProcess_i,start user process;user key name=%s;errmsg=%s"
+			, _key.c_str(),ex.what());
+		return false;
+	}
 }
 
 void UserProcessInfo::ReceiveMsg_i()
@@ -271,7 +291,7 @@ void UserProcessInfo::ReceiveMsg_i()
 		}
 		catch (const std::exception& ex)
 		{
-			Log(LOG_ERROR, NULL, "ReceiveMsg_i Erro:%s", ex.what());
+			Log2(LOG_ERROR,"ReceiveMsg_i Erro,%s", ex.what());
 		}
 	}
 }
