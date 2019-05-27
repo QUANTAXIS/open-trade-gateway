@@ -1172,6 +1172,7 @@ void traderctp::ProcessErrRtnOrderInsert(std::shared_ptr<CThostFtdcInputOrderFie
 		{
 			OutputNotifyAllSycn(pRspInfo->ErrorID
 				, u8"下单失败," + GBKToUTF8(pRspInfo->ErrorMsg), "WARNING");
+			m_input_order_key_map.erase(it);
 
 			//找到委托单
 			RemoteOrderKey remote_key;
@@ -1289,8 +1290,6 @@ void traderctp::ProcessErrRtnOrderInsert(std::shared_ptr<CThostFtdcInputOrderFie
 			order.changed = true;
 			m_something_changed = true;
 			SendUserData();
-
-			m_input_order_key_map.erase(it);
 		}
 	}
 }

@@ -38,29 +38,23 @@ bool UserProcessInfo::StartProcess()
 	{
 		if(_reqLogin.broker.broker_type == "ctp")
 		{			
-			std::string cmd = "ctp_" + _reqLogin.bid + "_" + _reqLogin.user_name;
-			
-			return StartProcess_i("open-trade-ctp", cmd);			
+			return StartProcess_i("open-trade-ctp",_key);
 		}
 		else if (_reqLogin.broker.broker_type == "ctpse13")
 		{
-			std::string cmd = "ctpse_" + _reqLogin.bid + "_" + _reqLogin.user_name;
-			return StartProcess_i("open-trade-ctpse", cmd);
+			return StartProcess_i("open-trade-ctpse",_key);
 		}
 		else if (_reqLogin.broker.broker_type == "ctpse")
 		{
-			std::string cmd = "ctpse15_" + _reqLogin.bid + "_" + _reqLogin.user_name;
-			return StartProcess_i("open-trade-ctpse15", cmd);			
+			return StartProcess_i("open-trade-ctpse15",_key);
 		}		
 		else if (_reqLogin.broker.broker_type == "sim")
 		{
-			std::string cmd = "sim_" + _reqLogin.bid + "_" + _reqLogin.user_name;
-			return StartProcess_i("open-trade-sim", cmd);			
+			return StartProcess_i("open-trade-sim",_key);
 		}
 		else if (_reqLogin.broker.broker_type == "perftest")
 		{
-			std::string cmd = "perftest_" + _reqLogin.bid + "_" + _reqLogin.user_name;
-			return StartProcess_i("open-trade-perftest",cmd);
+			return StartProcess_i("open-trade-perftest", _key);
 		}
 		else
 		{

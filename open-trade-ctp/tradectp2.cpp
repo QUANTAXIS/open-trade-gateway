@@ -22,15 +22,15 @@ using namespace trader_dll;
 using namespace std::chrono;
 
 traderctp::traderctp(boost::asio::io_context& ios
-	,const std::string& logFileName)
+	,const std::string& key)
 	:m_b_login(false)
-	,_logFileName(logFileName)
+	,_key(key)
 	,m_settlement_info("")
 	,_ios(ios)
 	,_out_mq_ptr()
-	,_out_mq_name(logFileName+"_msg_out")
+	,_out_mq_name(_key +"_msg_out")
 	,_in_mq_ptr()
-	,_in_mq_name(logFileName + "_msg_in")
+	,_in_mq_name(_key + "_msg_in")
 	,_thread_ptr()
 	,m_notify_seq(0)
 	,m_data_seq(0)
@@ -236,6 +236,11 @@ void traderctp::CloseConnection(int nId)
 	//如果已经没有客户端连接,将来要考虑条件单的情况
 	if (m_logined_connIds.empty())
 	{
+		if (m_need_save_file.load())
+		{
+			SaveToFile();
+		}
+
 		StopTdApi();
 		m_b_login.store(false);
 		_logIn_status = 0;
@@ -584,8 +589,9 @@ void traderctp::OnClientReqInsertOrder(CtpActionInsertOrder d)
 	
 	int r = m_pTdApi->ReqOrderInsert(&d.f, 0);
 	Log(LOG_INFO
-		,"msg=ctp ReqOrderInsert;instance=%p;bid=%s;UserID=%s;InstrumentID=%s;OrderRef=%s;ret=%d;OrderPriceType=%c;Direction=%c;CombOffsetFlag=%c;LimitPrice=%f;VolumeTotalOriginal=%d;VolumeCondition=%c;TimeCondition=%c"
+		,"msg=ctp ReqOrderInsert;instance=%p;orderid=%s;bid=%s;UserID=%s;InstrumentID=%s;OrderRef=%s;ret=%d;OrderPriceType=%c;Direction=%c;CombOffsetFlag=%c;LimitPrice=%f;VolumeTotalOriginal=%d;VolumeCondition=%c;TimeCondition=%c"
 		,this
+		,d.local_key.order_id.c_str()
 		,_req_login.bid.c_str()
 		,_req_login.user_name.c_str()
 		,d.f.InstrumentID
@@ -611,6 +617,17 @@ void traderctp::OnClientPeekMessage()
 
 void traderctp::ProcessReqLogIn(int connId,ReqLogin& req)
 {
+	Log(LOG_INFO
+		, "msg=traderctp ProcessReqLogIn;bid=%s;user_name=%s;client_ip=%s;client_port=%d;client_app_id=%s;client_system_info=%s;front=%s;broker_id=%s"
+		, req.bid.c_str()
+		, req.user_name.c_str()
+		, req.client_ip.c_str()
+		, req.client_port
+		, req.client_app_id.c_str()
+		, req.client_system_info.c_str()
+		, req.front.c_str()
+		, req.broker_id.c_str());
+
 	//如果CTP已经登录成功
 	if (m_b_login.load())
 	{
@@ -676,9 +693,11 @@ void traderctp::ProcessReqLogIn(int connId,ReqLogin& req)
 			(!_req_login.front.empty()))
 		{
 			Log(LOG_INFO
-				, "msg=ctp;broker_id=%s;front=%s"
+				, "msg=ctp login from custom front and broker_id;broker_id=%s;front=%s;user_name=%s;bid=%s"
 				, req.broker_id.c_str()
-				, req.front.c_str());
+				, req.front.c_str()
+				, req.user_name.c_str()
+				, req.bid.c_str());
 
 			_req_login.broker.ctp_broker_id = _req_login.broker_id;
 			_req_login.broker.trading_fronts.clear();

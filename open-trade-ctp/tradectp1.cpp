@@ -785,10 +785,10 @@ bool traderctp::OrderIdLocalToRemote(const LocalOrderKey& local_order_key
 
 void traderctp::OrderIdRemoteToLocal(const RemoteOrderKey& remote_order_key
 	, LocalOrderKey* local_order_key)
-{
+{	
 	auto it = m_ordermap_remote_local.find(remote_order_key);
 	if (it == m_ordermap_remote_local.end()) 
-	{
+	{		
 		char buf[1024];
 		sprintf(buf, "SERVER.%s.%08x.%d"
 			, remote_order_key.order_ref.c_str()
@@ -804,7 +804,9 @@ void traderctp::OrderIdRemoteToLocal(const RemoteOrderKey& remote_order_key
 		*local_order_key = it->second;
 		RemoteOrderKey& r = const_cast<RemoteOrderKey&>(it->first);
 		if (!remote_order_key.order_sys_id.empty())
+		{
 			r.order_sys_id = remote_order_key.order_sys_id;
+		}			
 	}
 }
 
@@ -1070,7 +1072,8 @@ void traderctp::ProcessErrRtnOrderInsert(std::shared_ptr<CThostFtdcInputOrderFie
 		if (it != m_input_order_key_map.end())
 		{
 			OutputNotifyAllSycn(pRspInfo->ErrorID
-				, u8"下单失败," + GBKToUTF8(pRspInfo->ErrorMsg),"WARNING");
+				, u8"下单失败," + GBKToUTF8(pRspInfo->ErrorMsg), "WARNING");
+			m_input_order_key_map.erase(it);
 
 			//找到委托单
 			RemoteOrderKey remote_key;
@@ -1188,9 +1191,7 @@ void traderctp::ProcessErrRtnOrderInsert(std::shared_ptr<CThostFtdcInputOrderFie
 			order.changed = true;
 			m_something_changed = true;
 			SendUserData();
-			
-			m_input_order_key_map.erase(it);			
-		}		
+		}
 	}
 }
 

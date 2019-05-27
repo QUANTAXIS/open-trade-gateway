@@ -85,6 +85,7 @@ void connection::OnOpenConnection(boost::system::error_code ec)
 	{
 		boost::asio::ip::tcp::endpoint remote_ep = m_ws_socket.next_layer().remote_endpoint();
 		_X_Real_IP = req_["X-Real-IP"].to_string();
+	
 		if (_X_Real_IP.empty())
 		{
 			_X_Real_IP = remote_ep.address().to_string();
@@ -99,7 +100,7 @@ void connection::OnOpenConnection(boost::system::error_code ec)
 		{
 			_X_Real_Port = atoi(real_port.c_str());
 		}
-
+		
 		SendTextMsg(g_config.broker_list_str);
 		DoRead();
 	}
@@ -237,26 +238,45 @@ void connection::OnMessage(const std::string &json_str)
 	SerializerTradeBase ss;
 	if (!ss.FromString(json_str.c_str()))
 	{
-		Log(LOG_INFO,"msg=%s;connection=%d;fd=%d"
+		Log(LOG_WARNING,"msg=%s;connection=%d;fd=%d"
 			, json_str.c_str()
 			,_connection_id
 			,m_ws_socket.next_layer().native_handle());
 		return;
 	}
-
+		
 	ReqLogin req;
 	ss.ToVar(req);
 
 	if (req.aid == "req_login")
 	{
-		Log(LOG_INFO,"msg=req_login;client_system_info=%s;client_app_id=%s"
-			, req.client_system_info.c_str()
-		, req.client_app_id.c_str());
+		Log(LOG_INFO,"msg=connection::OnMessage;aid=req_login;bid=%s;user_name=%s;client_app_id=%s;client_system_info=%s;client_ip=%s;client_port=%d;broker_id=%s;front=%s"
+			,req.bid.c_str()
+			,req.user_name.c_str()
+			,req.client_app_id.c_str()
+			,req.client_system_info.c_str()
+			,_X_Real_IP.c_str()
+			,_X_Real_Port
+			,req.broker_id.c_str()
+			,req.front.c_str()
+		);
 		ProcessLogInMessage(req, json_str);
 	}
 	else
 	{
 		ProcessOtherMessage(json_str);
+	}
+}
+
+void string_replace(std::string &strBig, const std::string &strsrc, const std::string &strdst)
+{
+	std::string::size_type pos = 0;
+	std::string::size_type srclen = strsrc.size();
+	std::string::size_type dstlen = strdst.size();
+	while ((pos = strBig.find(strsrc, pos)) != std::string::npos)
+	{
+		strBig.replace(pos, srclen, strdst);
+		pos += dstlen;
 	}
 }
 
@@ -268,10 +288,11 @@ void connection::ProcessLogInMessage(const ReqLogin& req, const std::string &jso
 	if (it == g_config.brokers.end())
 	{
 		Log(LOG_WARNING,"msg=trade server req_login invalid bid;connection=%d;bid=%s"
-			, _connection_id,req.bid.c_str());
+			,_connection_id
+			,req.bid.c_str());
 		std::stringstream ss;
 		ss << u8"暂不支持:" << req.bid << u8",请联系该期货公司或快期技术支持人员!";
-		OutputNotifySycn(1, ss.str(), "WARNING");
+		OutputNotifySycn(1,ss.str(),"WARNING");
 		return;
 	}
 
@@ -315,17 +336,46 @@ void connection::ProcessLogInMessage(const ReqLogin& req, const std::string &jso
 	SerializerTradeBase nss;
 	nss.FromVar(_reqLogin);
 	nss.ToString(&_login_msg);
+	
 	std::string strBrokerType = _reqLogin.broker.broker_type;
 
 	if (_user_broker_key.empty())
 	{
-		_user_broker_key = strBrokerType + "_" + _reqLogin.bid + "_" + _reqLogin.user_name;
+		//为了支持次席而添加的功能
+		if ((!_reqLogin.broker_id.empty()) &&
+			(!_reqLogin.front.empty()))
+		{
+			std::string strFront = _reqLogin.front;
+			string_replace(strFront,":", "_");
+			string_replace(strFront, "/", "");
+			string_replace(strFront,".","_");
+			_user_broker_key = strBrokerType + "_" + _reqLogin.bid + "_" 
+				+ _reqLogin.user_name+"_"+ _reqLogin.broker_id+"_"+ strFront;
+		}
+		else
+		{
+			_user_broker_key = strBrokerType + "_" + _reqLogin.bid + "_" + _reqLogin.user_name;
+		}		
 	}
 	else
 	{		
 		//防止一个连接进行多个登录
 		std::string new_user_broker_key= strBrokerType + "_" + _reqLogin.bid + "_" + _reqLogin.user_name;
-		Log(LOG_INFO,"old key=%s;new key=%s", _user_broker_key.c_str(), new_user_broker_key.c_str());
+		if ((!_reqLogin.broker_id.empty()) &&
+			(!_reqLogin.front.empty()))
+		{
+			std::string strFront = _reqLogin.front;
+			string_replace(strFront, ":", "_");
+			string_replace(strFront, "/", "");
+			string_replace(strFront, ".", "_");
+			new_user_broker_key = strBrokerType + "_" + _reqLogin.bid + "_"
+				+ _reqLogin.user_name + "_" + _reqLogin.broker_id + "_" + strFront;
+		}
+		
+		Log(LOG_INFO,"old key=%s;new key=%s"
+			, _user_broker_key.c_str()
+			, new_user_broker_key.c_str());
+
 		if (new_user_broker_key != _user_broker_key)
 		{
 			auto userIt = g_userProcessInfoMap.find(_user_broker_key);
@@ -344,6 +394,7 @@ void connection::ProcessLogInMessage(const ReqLogin& req, const std::string &jso
 				}
 			}
 		}
+
 		_user_broker_key = new_user_broker_key;
 	}
 	
