@@ -4,8 +4,8 @@
 //@copyright	上海信易信息科技股份有限公司 版权所有
 /////////////////////////////////////////////////////////////////////
 
-#include "trade_server.h"
-#include "config.h"
+#include "ms_config.h"
+#include "master_server.h"
 
 #include <iostream>
 #include <string>
@@ -17,31 +17,27 @@ int main(int argc, char* argv[])
 {
 	try
 	{
-		Log(LOG_INFO,nullptr
-			,"msg=trade server init;key=gateway");
+		LogMs(LOG_INFO,nullptr
+			,"msg=open trade gateway master init;key=gatewayms");
 
 		//加载配置文件
-		if (!LoadConfig())
+		if (!LoadMasterConfig())
 		{
-			Log(LOG_WARNING,nullptr
-				,"msg=trade_server load config failed!;key=gateway");
+			LogMs(LOG_WARNING,nullptr
+				,"msg=open trade gateway master load config failed!;key=gatewayms");			
 			return -1;
 		}
 
-		//启动md server
-		boost::process::child md_child(boost::process::search_path("open-trade-mdservice"));
-		
 		boost::asio::io_context ios;
-		
-		trade_server s(ios,g_config.port);
+
+		master_server s(ios,g_masterConfig);
 		if (!s.init())
 		{
-			md_child.terminate();
-			Log(LOG_INFO, nullptr
-				,"msg=trade_server init fail!;key=gateway");
+			LogMs(LOG_INFO,nullptr
+				,"msg=open trade gateway master init fail!;key=gatewayms");
 			return -1;
 		}
-		
+
 		std::atomic_bool flag;
 		flag.store(true);
 
@@ -52,16 +48,18 @@ int main(int argc, char* argv[])
 			signals_.add(SIGQUIT);
 		#endif 
 		signals_.async_wait(
-			[&s,&ios,&md_child,&flag](boost::system::error_code, int sig)
-		{						
-			md_child.terminate();
-			s.stop();	
+			[&s, &ios,&flag](boost::system::error_code,int sig)
+		{
+			s.stop();
 			flag.store(false);
 			ios.stop();
-			Log(LOG_INFO, nullptr
-				,"msg=trade_server got sig %d;key=gateway", sig);
-			Log(LOG_INFO, nullptr
-				,"msg=trade_server exit;key=gateway");
+
+			LogMs(LOG_INFO,nullptr
+				, "msg=open trade gateway master got sig %d;key=gatewayms"
+				, sig);
+
+			LogMs(LOG_INFO,nullptr
+				, "msg=open trade gateway master exit;key=gatewayms");
 		});
 		
 		while (flag.load())
@@ -71,11 +69,11 @@ int main(int argc, char* argv[])
 				ios.run();
 				break;
 			}
-			catch(std::exception& ex)
+			catch (std::exception& ex)
 			{
-				Log(LOG_ERROR,nullptr
-					,"msg=ios run exception;errmsg=%s;key=gateway"
-					,ex.what());
+				LogMs(LOG_ERROR,nullptr
+					, "msg=open trade gateway master ios run exception;errmsg=%s;key=gatewayms"
+					, ex.what());
 			}
 		}
 
@@ -84,5 +82,6 @@ int main(int argc, char* argv[])
 	catch (std::exception& e)
 	{
 		std::cerr << "exception: " << e.what() << std::endl;
+		return -1;
 	}
 }

@@ -236,7 +236,7 @@ private:
 
 	void StopTdApi();
 
-	void ReceiveMsg();
+	void ReceiveMsg(const std::string& key);
 
 	void ProcessInMsg(int connId,std::shared_ptr<std::string> msg_ptr);
 	
@@ -273,6 +273,8 @@ private:
 	int ReqAuthenticate();
 
 	int RegSystemInfo();
+
+	int ReqUserLogin();
 
 	void SendLoginRequest();
 
